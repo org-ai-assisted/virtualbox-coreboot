@@ -3437,18 +3437,22 @@ static DECLCALLBACK(int) ich9pciR3Construct(PPDMDEVINS pDevIns, int iInstance, P
      */
     if (fQ35HostBridge)
     {
-        PDMPciDevSetVendorId(  &pBus->PciDev, 0x8086); /* Intel */
-        PDMPciDevSetDeviceId(  &pBus->PciDev, 0x29c0); /* Q35/P35 MCH DRAM controller / host bridge */
-        PDMPciDevSetRevisionId(&pBus->PciDev,   0x00);
-        PDMPciDevSetClassBase( &pBus->PciDev,   0x06); /* bridge */
-        PDMPciDevSetClassSub(  &pBus->PciDev,   0x00); /* Host/PCI bridge */
-        PDMPciDevSetClassProg( &pBus->PciDev,   0x00); /* Host/PCI bridge */
-        PDMPciDevSetHeaderType(&pBus->PciDev,   0x00); /* bridge */
-        PDMPciDevSetWord(&pBus->PciDev,  VBOX_PCI_SEC_STATUS, 0x0280);  /* secondary status */
+        /* The root device reserves one PCI device slot (cMaxPciDevices=1); use it for the
+         * host bridge rather than the old embedded pBus->PciDev (removed in current PDM). */
+        PPDMPCIDEV const pHostBridge = pDevIns->apPciDevs[0];
+        PDMPciDevSetVendorId(  pHostBridge, 0x8086); /* Intel */
+        PDMPciDevSetDeviceId(  pHostBridge, 0x29c0); /* Q35/P35 MCH DRAM controller / host bridge */
+        PDMPciDevSetRevisionId(pHostBridge,   0x00);
+        PDMPciDevSetClassBase( pHostBridge,   0x06); /* bridge */
+        PDMPciDevSetClassSub(  pHostBridge,   0x00); /* Host/PCI bridge */
+        PDMPciDevSetClassProg( pHostBridge,   0x00); /* Host/PCI bridge */
+        PDMPciDevSetHeaderType(pHostBridge,   0x00);
+        PDMPciDevSetWord(pHostBridge, VBOX_PCI_SEC_STATUS, 0x0280);  /* secondary status */
 
-        pBus->PciDev.pDevIns               = pDevIns;
-        /* We register Host<->PCI controller on the bus */
-        ich9pciRegisterInternal(pBus, 0, &pBus->PciDev, "dram");
+        /* Register it at 00:00.0 so coreboot's PCIEXBAR config cycles reach a device. */
+        rc = PDMDevHlpPCIRegisterEx(pDevIns, pHostBridge, 0 /*fFlags*/, 0 /*uPciDevNo*/,
+                                    0 /*uPciFunNo*/, "dram");
+        AssertLogRelRCReturn(rc, rc);
     }
 
     /*
