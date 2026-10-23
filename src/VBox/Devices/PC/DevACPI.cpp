@@ -1998,7 +1998,11 @@ static DECLCALLBACK(VBOXSTRICTRC) acpiR3PM1aCtlWrite(PPDMDEVINS pDevIns, void *p
 
     VBOXSTRICTRC rc = VINF_SUCCESS;
     uint32_t const uSleepState = (pThis->pm1a_ctl >> SLP_TYPx_SHIFT) & SLP_TYPx_MASK;
-    if (uSleepState != pThis->uSleepState)
+    /* ACPI 1.0+ 4.7.2.2.1: the sleep transition is triggered by SLP_EN, not by
+       the SLP_TYP value alone.  Firmware legitimately pre-arms SLP_TYP (e.g.
+       coreboot writes SUS_TYP|SCI_EN with SLP_EN clear); acting on SLP_TYP
+       without SLP_EN spuriously powers the VM off. */
+    if ((u32 & SLP_EN) && uSleepState != pThis->uSleepState)
     {
         pThis->uSleepState = uSleepState;
         switch (uSleepState)

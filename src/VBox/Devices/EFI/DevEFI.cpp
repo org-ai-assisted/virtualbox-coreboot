@@ -1267,8 +1267,6 @@ static int efiParseFirmware(PPDMDEVINS pDevIns, PDEVEFI pThis, PDEVEFIR3 pThisCC
  */
 static int efiLoadRom(PPDMDEVINS pDevIns, PDEVEFI pThis, PDEVEFIR3 pThisCC, PCFGMNODE pCfg)
 {
-    RT_NOREF(pCfg);
-
     /*
      * Read the entire firmware volume into memory.
      */
@@ -1309,13 +1307,41 @@ static int efiLoadRom(PPDMDEVINS pDevIns, PDEVEFI pThis, PDEVEFIR3 pThisCC, PCFG
     }
 
     /*
-     * Validate firmware volume and figure out the load address as well as the SEC entry point.
+     * Raw coreboot image mode?  Map the whole image at the top of 4GB (reset vector
+     * at 0xFFFFFFF0) without any OVMF firmware-volume parsing.  To keep the shared
+     * device state (and thus the ring-0 registration) byte-identical to the normal
+     * path, we still instantiate a small vestigial flash device just below the ROM;
+     * coreboot ignores it, and the unmodified ring-0 construct stays happy.
      */
-    rc = efiParseFirmware(pDevIns, pThis, pThisCC);
-    if (RT_FAILURE(rc))
-        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
-                                   N_("Parsing the EFI firmware volume '%s' failed with rc=%Rrc"),
-                                   pThisCC->pszEfiRomFile, rc);
+    bool fCorebootRom = false;
+    rc = pDevIns->pHlpR3->pfnCFGMQueryBoolDef(pCfg, "CorebootRom", &fCorebootRom, false);
+    AssertLogRelRCReturn(rc, rc);
+    if (fCorebootRom)
+    {
+        pThisCC->cbEfiRom    = RT_ALIGN_64(pThisCC->cbEfiRom, GUEST_PAGE_SIZE);
+        pThisCC->offEfiRom   = 0;
+        pThisCC->cbNvram     = GUEST_PAGE_SIZE; /* vestigial flash, mapped just below the ROM */
+        pThisCC->GCPhysNvram = (RTGCPHYS)_4G - pThisCC->cbEfiRom - pThisCC->cbNvram;
+        rc = flashR3Init(&pThis->Flash, pThisCC->pDevIns, 0xA289 /*Intel*/, pThisCC->cbNvram, pThisCC->cbNvram);
+        if (RT_FAILURE(rc))
+            return rc;
+        rc = flashR3LoadFromBuf(&pThis->Flash, pThisCC->pu8EfiRom, pThisCC->cbNvram);
+        if (RT_FAILURE(rc))
+            return rc;
+        pThisCC->GCLoadAddress = pThisCC->GCPhysNvram + pThisCC->cbNvram;
+        LogRel(("EFI: coreboot image, %#RX64 bytes mapped at %RGp..4GB\n", pThisCC->cbEfiRom, pThisCC->GCLoadAddress));
+    }
+    else
+    {
+        /*
+         * Validate firmware volume and figure out the load address as well as the SEC entry point.
+         */
+        rc = efiParseFirmware(pDevIns, pThis, pThisCC);
+        if (RT_FAILURE(rc))
+            return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                       N_("Parsing the EFI firmware volume '%s' failed with rc=%Rrc"),
+                                       pThisCC->pszEfiRomFile, rc);
+    }
 
     /*
      * Map the firmware volume into memory as shadowed ROM.
@@ -1522,6 +1548,7 @@ static DECLCALLBACK(int)  efiConstruct(PPDMDEVINS pDevIns, int iInstance, PCFGMN
      */
     PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns,
                                   "EfiRom|"
+                                  "CorebootRom|"
                                   "NumCPUs|"
                                   "McfgBase|"
                                   "McfgLength|"
