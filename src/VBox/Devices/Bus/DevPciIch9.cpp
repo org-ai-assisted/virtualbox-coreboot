@@ -3417,16 +3417,18 @@ static DECLCALLBACK(int) ich9pciR3Construct(PPDMDEVINS pDevIns, int iInstance, P
     /*
      * Fill in PCI configs and add them to the bus.
      */
-    /** @todo Disabled for now because this causes error messages with Linux guests.
-     *         The guest loads the x38_edac device which tries to map a memory region
-     *         using an address given at place 0x48 - 0x4f in the PCI config space.
-     *         This fails. because we don't register such a region.
+    /*
+     * Host bridge device at D0:F0.  A coreboot qemu-q35 payload programs PCIEXBAR at
+     * config offset 0x60/0x64 and its mainboard_machine_check() die()s unless 00:00.0
+     * responds and the register reads back the written value; offset 0x60 is a
+     * device-specific, writable register, so the default config-space store is enough.
+     * Use the Q35/P35 MCH id 0x29c0 (as QEMU's q35 MCH does): the historical reason this
+     * was disabled was that id 0x29e0 made a Linux guest's x38_edac driver try to map a
+     * non-existent 0x48-0x4f MMR; 0x29c0 does not bind that driver.
      */
-#if 0
-    /* Host bridge device */
     PDMPciDevSetVendorId(  &pBus->PciDev, 0x8086); /* Intel */
-    PDMPciDevSetDeviceId(  &pBus->PciDev, 0x29e0); /* Desktop */
-    PDMPciDevSetRevisionId(&pBus->PciDev,   0x01); /* rev. 01 */
+    PDMPciDevSetDeviceId(  &pBus->PciDev, 0x29c0); /* Q35/P35 MCH DRAM controller / host bridge */
+    PDMPciDevSetRevisionId(&pBus->PciDev,   0x00);
     PDMPciDevSetClassBase( &pBus->PciDev,   0x06); /* bridge */
     PDMPciDevSetClassSub(  &pBus->PciDev,   0x00); /* Host/PCI bridge */
     PDMPciDevSetClassProg( &pBus->PciDev,   0x00); /* Host/PCI bridge */
@@ -3436,7 +3438,6 @@ static DECLCALLBACK(int) ich9pciR3Construct(PPDMDEVINS pDevIns, int iInstance, P
     pBus->PciDev.pDevIns               = pDevIns;
     /* We register Host<->PCI controller on the bus */
     ich9pciRegisterInternal(pBus, 0, &pBus->PciDev, "dram");
-#endif
 
     /*
      * Register I/O ports.
