@@ -3337,6 +3337,54 @@ DECLCALLBACK(void) devpciR3InfoPciIrq(PPDMDEVINS pDevIns, PCDBGFINFOHLP pHlp, co
 
 
 /**
+ * Config read intercept for the opt-in Q35 MCH host bridge (plain passthrough).
+ */
+static DECLCALLBACK(VBOXSTRICTRC) ich9pciR3HostBridgeConfigRead(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev,
+                                                               uint32_t uAddress, unsigned cb, uint32_t *pu32Value)
+{
+    return PDMDevHlpPCIConfigRead(pDevIns, pPciDev, uAddress, cb, pu32Value);
+}
+
+/**
+ * Config write intercept for the opt-in Q35 MCH host bridge.
+ *
+ * PCIEXBAR (the 64-bit register at 0x60; bit 0 = enable, bits 2:1 = length) relocates the
+ * ECAM/MMCONFIG window to the programmed base -- as a real Q35 MCH does (cf. QEMU's
+ * mch_update_pciexbar).  This lets coreboot/firmware program the standard base (0xb0000000)
+ * rather than depend on VBox's default McfgBase.  All other registers pass straight through.
+ */
+static DECLCALLBACK(VBOXSTRICTRC) ich9pciR3HostBridgeConfigWrite(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev,
+                                                                uint32_t uAddress, unsigned cb, uint32_t u32Value)
+{
+    PDEVPCIROOT const pPciRoot = PDMINS_2_DATA(pDevIns, PDEVPCIROOT);
+    VBOXSTRICTRC      rcStrict  = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, uAddress, cb, u32Value);
+
+    if (uAddress >= 0x60 && uAddress < 0x68 && pPciRoot->hMmioMcfg != NIL_IOMMMIOHANDLE)
+    {
+        uint64_t const uPciexbar = ((uint64_t)PDMPciDevGetDWord(pPciDev, 0x64) << 32)
+                                 |             PDMPciDevGetDWord(pPciDev, 0x60);
+        if (uPciexbar & RT_BIT_64(0)) /* MMCONFIG enable */
+        {
+            /* length field: 0 = 256MB, 1 = 128MB, 2 = 64MB -> base-alignment mask */
+            static uint64_t const s_auBaseMask[4] =
+            {
+                UINT64_C(0xfffffffff0000000), /* 256 MB */
+                UINT64_C(0xfffffffff8000000), /* 128 MB */
+                UINT64_C(0xfffffffffc000000), /*  64 MB */
+                UINT64_C(0xfffffffffc000000)  /* reserved -> treat as 64 MB */
+            };
+            uint64_t const uBase = uPciexbar & s_auBaseMask[(uPciexbar >> 1) & 3];
+            PDMDevHlpMmioUnmap(pDevIns, pPciRoot->hMmioMcfg);
+            int const rc = PDMDevHlpMmioMap(pDevIns, pPciRoot->hMmioMcfg, uBase);
+            AssertLogRelRC(rc);
+        }
+        else
+            PDMDevHlpMmioUnmap(pDevIns, pPciRoot->hMmioMcfg);
+    }
+    return rcStrict;
+}
+
+/**
  * @interface_method_impl{PDMDEVREG,pfnConstruct}
  */
 static DECLCALLBACK(int) ich9pciR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFGMNODE  pCfg)
@@ -3452,6 +3500,12 @@ static DECLCALLBACK(int) ich9pciR3Construct(PPDMDEVINS pDevIns, int iInstance, P
         /* Register it at 00:00.0 so coreboot's PCIEXBAR config cycles reach a device. */
         rc = PDMDevHlpPCIRegisterEx(pDevIns, pHostBridge, 0 /*fFlags*/, 0 /*uPciDevNo*/,
                                     0 /*uPciFunNo*/, "dram");
+        AssertLogRelRCReturn(rc, rc);
+
+        /* Intercept config writes so PCIEXBAR relocates the ECAM window (real-Q35 behaviour). */
+        rc = PDMDevHlpPCIInterceptConfigAccesses(pDevIns, pHostBridge,
+                                                 ich9pciR3HostBridgeConfigRead,
+                                                 ich9pciR3HostBridgeConfigWrite);
         AssertLogRelRCReturn(rc, rc);
     }
 
