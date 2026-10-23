@@ -3354,11 +3354,18 @@ static DECLCALLBACK(int) ich9pciR3Construct(PPDMDEVINS pDevIns, int iInstance, P
     /*
      * Validate and read configuration.
      */
-    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "IOAPIC|McfgBase|McfgLength", "");
+    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "IOAPIC|McfgBase|McfgLength|Q35HostBridge", "");
 
     /* query whether we got an IOAPIC */
     int rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "IOAPIC", &pPciRoot->fUseIoApic, false /** @todo default to true? */);
     AssertRCReturn(rc, PDMDEV_SET_ERROR(pDevIns, rc, N_("Configuration error: Failed to query boolean value \"IOAPIC\"")));
+
+    /* Opt-in Q35 MCH host bridge at D0:F0 (default off -> legacy ICH9 behaviour is
+     * unchanged).  Needed by a coreboot qemu-q35 payload, which programs PCIEXBAR and
+     * checks its readback.  Set via the device config for that use case only. */
+    bool fQ35HostBridge = false;
+    rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "Q35HostBridge", &fQ35HostBridge, false);
+    AssertRCReturn(rc, PDMDEV_SET_ERROR(pDevIns, rc, N_("Configuration error: Failed to query boolean value \"Q35HostBridge\"")));
 
     if (!pPciRoot->fUseIoApic)
         return PDMDEV_SET_ERROR(pDevIns, rc, N_("Must use IO-APIC with ICH9 chipset"));
@@ -3418,26 +3425,31 @@ static DECLCALLBACK(int) ich9pciR3Construct(PPDMDEVINS pDevIns, int iInstance, P
      * Fill in PCI configs and add them to the bus.
      */
     /*
-     * Host bridge device at D0:F0.  A coreboot qemu-q35 payload programs PCIEXBAR at
-     * config offset 0x60/0x64 and its mainboard_machine_check() die()s unless 00:00.0
-     * responds and the register reads back the written value; offset 0x60 is a
-     * device-specific, writable register, so the default config-space store is enough.
-     * Use the Q35/P35 MCH id 0x29c0 (as QEMU's q35 MCH does): the historical reason this
-     * was disabled was that id 0x29e0 made a Linux guest's x38_edac driver try to map a
-     * non-existent 0x48-0x4f MMR; 0x29c0 does not bind that driver.
+     * Host bridge device at D0:F0, opt-in via Q35HostBridge (default off, so legacy ICH9
+     * guests are unaffected -- the host bridge stays absent as before).  A coreboot
+     * qemu-q35 payload programs PCIEXBAR at config offset 0x60/0x64 and its
+     * mainboard_machine_check() die()s unless 00:00.0 responds and the register reads back
+     * the written value; offset 0x60 is a device-specific, writable register, so the
+     * default config-space store is enough.  Use the Q35/P35 MCH id 0x29c0 (as QEMU's q35
+     * MCH does): the historical reason the host bridge was disabled was that id 0x29e0 made
+     * a Linux guest's x38_edac driver try to map a non-existent 0x48-0x4f MMR; 0x29c0 does
+     * not bind that driver.
      */
-    PDMPciDevSetVendorId(  &pBus->PciDev, 0x8086); /* Intel */
-    PDMPciDevSetDeviceId(  &pBus->PciDev, 0x29c0); /* Q35/P35 MCH DRAM controller / host bridge */
-    PDMPciDevSetRevisionId(&pBus->PciDev,   0x00);
-    PDMPciDevSetClassBase( &pBus->PciDev,   0x06); /* bridge */
-    PDMPciDevSetClassSub(  &pBus->PciDev,   0x00); /* Host/PCI bridge */
-    PDMPciDevSetClassProg( &pBus->PciDev,   0x00); /* Host/PCI bridge */
-    PDMPciDevSetHeaderType(&pBus->PciDev,   0x00); /* bridge */
-    PDMPciDevSetWord(&pBus->PciDev,  VBOX_PCI_SEC_STATUS, 0x0280);  /* secondary status */
+    if (fQ35HostBridge)
+    {
+        PDMPciDevSetVendorId(  &pBus->PciDev, 0x8086); /* Intel */
+        PDMPciDevSetDeviceId(  &pBus->PciDev, 0x29c0); /* Q35/P35 MCH DRAM controller / host bridge */
+        PDMPciDevSetRevisionId(&pBus->PciDev,   0x00);
+        PDMPciDevSetClassBase( &pBus->PciDev,   0x06); /* bridge */
+        PDMPciDevSetClassSub(  &pBus->PciDev,   0x00); /* Host/PCI bridge */
+        PDMPciDevSetClassProg( &pBus->PciDev,   0x00); /* Host/PCI bridge */
+        PDMPciDevSetHeaderType(&pBus->PciDev,   0x00); /* bridge */
+        PDMPciDevSetWord(&pBus->PciDev,  VBOX_PCI_SEC_STATUS, 0x0280);  /* secondary status */
 
-    pBus->PciDev.pDevIns               = pDevIns;
-    /* We register Host<->PCI controller on the bus */
-    ich9pciRegisterInternal(pBus, 0, &pBus->PciDev, "dram");
+        pBus->PciDev.pDevIns               = pDevIns;
+        /* We register Host<->PCI controller on the bus */
+        ich9pciRegisterInternal(pBus, 0, &pBus->PciDev, "dram");
+    }
 
     /*
      * Register I/O ports.
