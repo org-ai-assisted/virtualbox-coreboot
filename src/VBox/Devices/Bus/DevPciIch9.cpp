@@ -3402,18 +3402,20 @@ static DECLCALLBACK(int) ich9pciR3Construct(PPDMDEVINS pDevIns, int iInstance, P
     /*
      * Validate and read configuration.
      */
-    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "IOAPIC|McfgBase|McfgLength|Q35HostBridge", "");
+    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "IOAPIC|McfgBase|McfgLength|Q35Chipset", "");
 
     /* query whether we got an IOAPIC */
     int rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "IOAPIC", &pPciRoot->fUseIoApic, false /** @todo default to true? */);
     AssertRCReturn(rc, PDMDEV_SET_ERROR(pDevIns, rc, N_("Configuration error: Failed to query boolean value \"IOAPIC\"")));
 
-    /* Opt-in Q35 MCH host bridge at D0:F0 (default off -> legacy ICH9 behaviour is
-     * unchanged).  Needed by a coreboot qemu-q35 payload, which programs PCIEXBAR and
-     * checks its readback.  Set via the device config for that use case only. */
-    bool fQ35HostBridge = false;
-    rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "Q35HostBridge", &fQ35HostBridge, false);
-    AssertRCReturn(rc, PDMDEV_SET_ERROR(pDevIns, rc, N_("Configuration error: Failed to query boolean value \"Q35HostBridge\"")));
+    /* Opt-in Q35 chipset emulation (default off -> legacy ICH9 behaviour is unchanged).
+     * Adds the two PCI devices a coreboot qemu-q35 payload requires to boot: the Q35 MCH
+     * host bridge at D0:F0 (programs PCIEXBAR, relocating the ECAM window) and a minimal
+     * ICH9 SMBus controller at D31:F3 (i82801ix early-init die()s if it is absent).  Set
+     * via the device config for that use case only. */
+    bool fQ35Chipset = false;
+    rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "Q35Chipset", &fQ35Chipset, false);
+    AssertRCReturn(rc, PDMDEV_SET_ERROR(pDevIns, rc, N_("Configuration error: Failed to query boolean value \"Q35Chipset\"")));
 
     if (!pPciRoot->fUseIoApic)
         return PDMDEV_SET_ERROR(pDevIns, rc, N_("Must use IO-APIC with ICH9 chipset"));
@@ -3483,10 +3485,10 @@ static DECLCALLBACK(int) ich9pciR3Construct(PPDMDEVINS pDevIns, int iInstance, P
      * a Linux guest's x38_edac driver try to map a non-existent 0x48-0x4f MMR; 0x29c0 does
      * not bind that driver.
      */
-    if (fQ35HostBridge)
+    if (fQ35Chipset)
     {
-        /* The root device reserves one PCI device slot (cMaxPciDevices=1); use it for the
-         * host bridge rather than the old embedded pBus->PciDev (removed in current PDM). */
+        /* The root device reserves two PCI device slots (cMaxPciDevices=2) for the opt-in
+         * Q35 chipset devices, rather than the old embedded pBus->PciDev (removed in current PDM). */
         PPDMPCIDEV const pHostBridge = pDevIns->apPciDevs[0];
         PDMPciDevSetVendorId(  pHostBridge, 0x8086); /* Intel */
         PDMPciDevSetDeviceId(  pHostBridge, 0x29c0); /* Q35/P35 MCH DRAM controller / host bridge */
@@ -3506,6 +3508,23 @@ static DECLCALLBACK(int) ich9pciR3Construct(PPDMDEVINS pDevIns, int iInstance, P
         rc = PDMDevHlpPCIInterceptConfigAccesses(pDevIns, pHostBridge,
                                                  ich9pciR3HostBridgeConfigRead,
                                                  ich9pciR3HostBridgeConfigWrite);
+        AssertLogRelRCReturn(rc, rc);
+
+        /* Minimal ICH9 SMBus controller at 00:1f.3.  coreboot's i82801ix early-init calls
+         * enable_smbus() under ENV_RAMINIT and die()s if no Intel device answers there; it only
+         * reads the vendor id and then writes SMB_BASE/HOSTC/COMMAND (plain config stores) and
+         * resets the host via I/O with no status polling.  qemu-q35 never issues a real SMBus
+         * transaction (no SPD read), so a bare presence stub -- no I/O backend -- is sufficient. */
+        PPDMPCIDEV const pSmbus = pDevIns->apPciDevs[1];
+        PDMPciDevSetVendorId(  pSmbus, 0x8086); /* Intel */
+        PDMPciDevSetDeviceId(  pSmbus, 0x2930); /* ICH9 SMBus controller */
+        PDMPciDevSetRevisionId(pSmbus,   0x00);
+        PDMPciDevSetClassBase( pSmbus,   0x0c); /* serial bus controller */
+        PDMPciDevSetClassSub(  pSmbus,   0x05); /* SMBus */
+        PDMPciDevSetClassProg( pSmbus,   0x00);
+        PDMPciDevSetHeaderType(pSmbus,   0x00);
+        rc = PDMDevHlpPCIRegisterEx(pDevIns, pSmbus, 0 /*fFlags*/, 31 /*uPciDevNo*/,
+                                    3 /*uPciFunNo*/, "smbus");
         AssertLogRelRCReturn(rc, rc);
     }
 
@@ -4000,7 +4019,7 @@ const PDMDEVREG g_DevicePciIch9 =
     /* .cbInstanceShared = */       sizeof(DEVPCIROOT),
     /* .cbInstanceCC = */           sizeof(CTX_SUFF(DEVPCIBUS)),
     /* .cbInstanceRC = */           sizeof(DEVPCIBUSRC),
-    /* .cMaxPciDevices = */         1,
+    /* .cMaxPciDevices = */         2,  /* host bridge + SMBus stub for the opt-in Q35Chipset mode */
     /* .cMaxMsixVectors = */        0,
     /* .pszDescription = */         "ICH9 PCI bridge",
 #if defined(IN_RING3)
